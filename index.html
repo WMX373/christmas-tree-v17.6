@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#04070d" />
+<title>christmas-tree v17.6 · Merry Christmas</title>
+<style>
+  html, body { height: 100%; margin: 0; background: #04070d; overflow: hidden; }
+  body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  canvas#scene { display: block; width: 100vw; height: 100vh; touch-action: none; cursor: crosshair; }
+
+  .overlay {
+    position: fixed; inset: 0; pointer-events: none;
+    display: flex; flex-direction: column; justify-content: space-between;
+    -webkit-user-select: none; user-select: none;
+  }
+  .top { padding: clamp(20px, 5vh, 48px) 18px 0; text-align: center; }
+  .top h1 {
+    margin: 0; font-weight: 600;
+    font-size: clamp(17px, 3.2vw, 34px);
+    letter-spacing: .26em; color: #f6f9ff;
+    text-shadow: 0 0 16px rgba(255, 198, 128, .55), 0 0 48px rgba(255, 150, 84, .24);
+  }
+  .top .sub {
+    margin-top: .85em; font-size: clamp(9px, 1.25vw, 12px);
+    letter-spacing: .46em; color: #94aacb; text-transform: uppercase;
+  }
+  .bottom { padding: 0 18px clamp(18px, 3.4vh, 38px); text-align: center; }
+  .bottom .tip {
+    font-size: clamp(10px, 1.3vw, 12px);
+    letter-spacing: .22em; color: #90a6c6; opacity: .85;
+    transition: opacity .6s ease;
+  }
+  .bottom .brand {
+    margin-top: .75em; font-size: 10px; letter-spacing: .34em;
+    color: #566a89; text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div class="overlay">
+  <div class="top">
+    <h1>MERRY CHRISTMAS</h1>
+    <div class="sub">2 0 2 6 &nbsp;·&nbsp; 圣 诞 快 乐</div>
+  </div>
+  <div class="bottom">
+    <div class="tip" id="tip">点击任意位置，点亮这棵树</div>
+    <div class="brand">christmas-tree &nbsp;·&nbsp; v17.6</div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var canvas = document.getElementById("scene");
+  var ctx = canvas.getContext("2d");
+  var tipEl = document.getElementById("tip");
+  var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var W = 0, H = 0, DPR = 1;
+  var cx = 0, cy = 0, treeH = 0, baseR = 0, focal = 1;
+  var rot = 0, pointerX = 0.5, last = 0;
+
+  var treePoints = [], bgStars = [], flakes = [], sparks = [];
+  var bgGrad = null, floorGrad = null, vignette = null;
+
+  // ---------- 颜色 / 精灵缓存 ----------
+  var SPRITE_SIZE = 64;
+  var spriteCache = {};
+
+  function hexToRgb(hex) {
+    var h = hex.replace("#", "");
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    var n = parseInt(h, 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  function makeSprite(hex) {
+    if (spriteCache[hex]) return spriteCache[hex];
+    var S = SPRITE_SIZE;
+    var c = document.createElement("canvas");
+    c.width = S; c.height = S;
+    var g = c.getContext("2d");
+    var rgb = hexToRgb(hex);
+    var rg = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+    rg.addColorStop(0, "rgba(255,255,255,0.72)");
+    rg.addColorStop(0.10, "rgba(" + rgb[0] + "," + rgb[1] + "," + rgb[2] + ",0.92)");
+    rg.addColorStop(0.38, "rgba(" + rgb[0] + "," + rgb[1] + "," + rgb[2] + ",0.34)");
+    rg.addColorStop(1, "rgba(" + rgb[0] + "," + rgb[1] + "," + rgb[2] + ",0)");
+    g.fillStyle = rg;
+    g.beginPath();
+    g.arc(S / 2, S / 2, S / 2, 0, Math.PI * 2);
+    g.fill();
+    spriteCache[hex] = c;
+    return c;
+  }
+
+  var C = {
+    deepGreen: "#1c9e6c",
+    green: "#3ddc93",
+    lightGreen: "#8df7c4",
+    gold: "#ffd98a",
+    warm: "#ffb469",
+    red: "#ff7f8f",
+    blue: "#93d8ff",
+    pink: "#ffabe0",
+    white: "#ffffff",
+    ice: "#dff3ff"
+  };
+
+  var LIGHT_COLORS = [C.gold, C.red, C.blue, C.pink, C.lightGreen];
+
+  function pickLightColor() {
+    return LIGHT_COLORS[Math.floor(Math.random() * LIGHT_COLORS.length)];
+  }
+
+  // ---------- 场景构建 ----------
+  function buildScene() {
+    treeH = Math.min(H * 0.58, W * 0.92);
+    baseR = treeH * 0.31;
+    cx = W / 2;
+    cy = H * 0.50;
+    focal = treeH * 1.7;
+
+    treePoints = [];
+
+    // 主体：多股螺旋光点（顶尖 -> 底宽，分层裙边）
+    var STRANDS = 7;
+    var PER = 330;
+    var TURNS = 6.2;
+    var TIERS = 7;
+
+    for (var s = 0; s < STRANDS; s++) {
+      for (var i = 0; i < PER; i++) {
+        var t = i / (PER - 1); // 0 顶 -> 1 底
+        var tierPhase = (t * TIERS) % 1;
+        var tierBoost = 0.58 + 0.42 * Math.cos((tierPhase - 0.5) * Math.PI * 0.9);
+        var r = baseR * Math.pow(t, 0.92) * (0.90 + 0.10 * tierPhase) * (0.96 + Math.random() * 0.06);
+        var a = t * TURNS * Math.PI * 2 + s * (Math.PI * 2 / STRANDS) + (Math.random() - 0.5) * 0.22;
+        var y = -treeH * 0.5 + t * treeH;
+        var isLight = Math.random() < 0.085;
+
+        treePoints.push({
+          x: Math.cos(a) * r,
+          y: y + (Math.random() - 0.5) * treeH * 0.008,
+          z: Math.sin(a) * r,
+          r: isLight ? 1.75 : 0.85 + Math.random() * 0.62,
+          light: isLight,
+          color: isLight ? pickLightColor() : (Math.random() < 0.16 ? C.lightGreen : (Math.random() < 0.45 ? C.green : C.deepGreen)),
+          tw: Math.random() * Math.PI * 2,
+          baseAlpha: isLight ? 0.86 : (0.26 + Math.random() * 0.22) * tierBoost
+        });
+      }
+    }
+
+    // 体积感：圆锥内部稀疏点
+    for (var k = 0; k < 460; k++) {
+      var tk = Math.pow(Math.random(), 0.55);
+      var rr = baseR * tk * Math.sqrt(Math.random()) * 0.85;
+      var ang = Math.random() * Math.PI * 2;
+      treePoints.push({
+        x: Math.cos(ang) * rr,
+        y: -treeH * 0.5 + tk * treeH,
+        z: Math.sin(ang) * rr,
+        r: 0.45 + Math.random() * 0.5,
+        light: false,
+        color: tk > 0.6 ? C.green : C.deepGreen,
+        tw: Math.random() * Math.PI * 2,
+        baseAlpha: 0.10 + Math.random() * 0.12
+      });
+    }
+
+    // 背景星
+    bgStars = [];
+    var starCount = Math.round(Math.min(160, (W * H) / 12000));
+    for (var n = 0; n < starCount; n++) {
+      bgStars.push({
+        x: Math.random() * W,
+        y: Math.random() * H * 0.92,
+        r: 0.4 + Math.random() * 1.1,
+        tw: Math.random() * Math.PI * 2,
+        sp: 0.6 + Math.random() * 1.8,
+        a: 0.25 + Math.random() * 0.55
+      });
+    }
+
+    // 雪
+    flakes = [];
+    var flakeCount = Math.round(Math.min(230, (W * H) / 9000));
+    for (var f = 0; f < flakeCount; f++) {
+      flakes.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        r: 0.5 + Math.random() * 1.6,
+        vy: 0.12 + Math.random() * 0.42,
+        vx: -0.12 + Math.random() * 0.24,
+        ph: Math.random() * Math.PI * 2,
+        a: 0.18 + Math.random() * 0.55
+      });
+    }
+
+    // 渐变缓存
+    bgGrad = ctx.createRadialGradient(cx, H * 0.52, 0, cx, H * 0.52, Math.max(W, H) * 0.85);
+    bgGrad.addColorStop(0, "#08131f");
+    bgGrad.addColorStop(0.42, "#050c14");
+    bgGrad.addColorStop(1, "#02040a");
+
+    floorGrad = ctx.createRadialGradient(cx, cy + treeH * 0.50, 0, cx, cy + treeH * 0.50, baseR * 2.6);
+    floorGrad.addColorStop(0, "rgba(60,190,140,0.22)");
+    floorGrad.addColorStop(0.35, "rgba(40,120,110,0.10)");
+    floorGrad.addColorStop(1, "rgba(0,0,0,0)");
+
+    vignette = ctx.createRadialGradient(cx, H * 0.5, Math.min(W, H) * 0.32, cx, H * 0.5, Math.max(W, H) * 0.78);
+    vignette.addColorStop(0, "rgba(0,0,0,0)");
+    vignette.addColorStop(1, "rgba(0,0,0,0.72)");
+  }
+
+  // ---------- 投影 ----------
+  var PITCH = 0.11;
+
+  function project(x, y, z, cosR, sinR) {
+    var rx = x * cosR + z * sinR;
+    var rz = -x * sinR + z * cosR;
+    var py = y * Math.cos(PITCH) - rz * Math.sin(PITCH);
+    var pz = y * Math.sin(PITCH) + rz * Math.cos(PITCH);
+    var sc = focal / (focal + pz);
+    return { sx: cx + rx * sc, sy: cy + py * sc, sc: sc };
+  }
+
+  // ---------- 交互 ----------
+  function burst(px, py) {
+    var count = reduceMotion ? 34 : 86;
+    var palette = [C.gold, C.white, C.warm, C.red, C.pink, C.ice];
+    for (var i = 0; i < count; i++) {
+      var ang = Math.random() * Math.PI * 2;
+      var sp = 40 + Math.random() * 260;
+      sparks.push({
+        x: px, y: py,
+        vx: Math.cos(ang) * sp,
+        vy: Math.sin(ang) * sp - 40,
+        life: 0, max: 0.9 + Math.random() * 1.1,
+        r: 1.2 + Math.random() * 2.4,
+        color: palette[Math.floor(Math.random() * palette.length)]
+      });
+    }
+    tipEl.textContent = "圣诞快乐 · Merry Christmas 🎄";
+    tipEl.style.opacity = "1";
+    clearTimeout(burst.timer);
+    burst.timer = setTimeout(function () {
+      tipEl.textContent = "点击任意位置，点亮这棵树";
+      tipEl.style.opacity = ".85";
+    }, 4200);
+  }
+
+  canvas.addEventListener("pointerdown", function (e) {
+    burst(e.clientX, e.clientY);
+  });
+
+  window.addEventListener("pointermove", function (e) {
+    pointerX = e.clientX / Math.max(W, 1);
+  });
+
+  // ---------- 绘制 ----------
+  function drawBackground() {
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function drawStars(now) {
+    ctx.globalCompositeOperation = "lighter";
+    var sp = makeSprite(C.ice);
+    for (var i = 0; i < bgStars.length; i++) {
+      var st = bgStars[i];
+      var a = st.a * (0.55 + 0.45 * Math.sin(st.tw + now * 0.0012 * st.sp));
+      var size = st.r * 9;
+      ctx.globalAlpha = a;
+      ctx.drawImage(sp, st.x - size / 2, st.y - size / 2, size, size);
+    }
+  }
+
+  function drawFloor() {
+    ctx.globalCompositeOperation = "lighter";
+    ctx.globalAlpha = 0.9;
+    ctx.save();
+    var scBase = focal / (focal + treeH * 0.5 * Math.sin(PITCH) + baseR * Math.cos(PITCH));
+    ctx.translate(cx, cy + treeH * 0.5 * Math.cos(PITCH) * scBase);
+    ctx.scale(1, 0.28);
+    ctx.fillStyle = floorGrad;
+    ctx.beginPath();
+    ctx.arc(0, 0, baseR * 2.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawTree(now) {
+    ctx.globalCompositeOperation = "lighter";
+    var cosR = Math.cos(rot), sinR = Math.sin(rot);
+
+    for (var i = 0; i < treePoints.length; i++) {
+      var p = treePoints[i];
+      var pr = project(p.x, p.y, p.z, cosR, sinR);
+      if (pr.sx < -60 || pr.sx > W + 60 || pr.sy < -60 || pr.sy > H + 60) continue;
+
+      var size = p.r * pr.sc * 4.9;
+      var alpha = p.baseAlpha;
+
+      if (p.light) {
+        alpha *= 0.62 + 0.38 * Math.sin(p.tw + now * 0.0042);
+        size *= 1.18;
+      } else {
+        alpha *= 0.55 + 0.45 * pr.sc;
+      }
+
+      // 远处更暗，近处更亮
+      alpha *= Math.min(1, 0.35 + pr.sc * 0.75);
+      if (alpha <= 0.01) continue;
+
+      ctx.globalAlpha = Math.min(1, alpha);
+      ctx.drawImage(makeSprite(p.color), pr.sx - size / 2, pr.sy - size / 2, size, size);
+    }
+  }
+
+  function drawStarTopper(now) {
+    var cosR = Math.cos(rot), sinR = Math.sin(rot);
+    var topY = -treeH * 0.5 - treeH * 0.020;
+    var pr = project(0, topY, 0, cosR, sinR);
+    var pulse = 0.82 + 0.18 * Math.sin(now * 0.0038);
+    var big = treeH * 0.13 * pulse;
+    var gold = makeSprite(C.gold);
+
+    ctx.globalCompositeOperation = "lighter";
+
+    ctx.globalAlpha = 0.95;
+    ctx.drawImage(gold, pr.sx - big / 2, pr.sy - big / 2, big, big);
+
+    ctx.save();
+    ctx.translate(pr.sx, pr.sy);
+    ctx.globalAlpha = 0.5;
+    ctx.scale(4.2, 0.55);
+    ctx.drawImage(gold, -big / 2, -big / 2, big, big);
+    ctx.scale(1 / 4.2, 1 / 0.55);
+    ctx.scale(0.55, 4.2);
+    ctx.drawImage(gold, -big / 2, -big / 2, big, big);
+    ctx.restore();
+
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "rgba(255,245,220,0.9)";
+    ctx.beginPath();
+    ctx.arc(pr.sx, pr.sy, Math.max(2, treeH * 0.008 * pulse), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawSparks(dt) {
+    if (!sparks.length) return;
+    ctx.globalCompositeOperation = "lighter";
+    for (var i = sparks.length - 1; i >= 0; i--) {
+      var s = sparks[i];
+      s.life += dt;
+      if (s.life >= s.max) { sparks.splice(i, 1); continue; }
+      s.vy += 120 * dt;
+      s.vx *= 0.96;
+      s.vy *= 0.96;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+
+      var k = 1 - s.life / s.max;
+      var size = s.r * 8 * (0.35 + k * 0.9);
+      ctx.globalAlpha = Math.max(0, k * 1.1);
+      ctx.drawImage(makeSprite(s.color), s.x - size / 2, s.y - size / 2, size, size);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawSnow(dt, now) {
+    ctx.globalCompositeOperation = "lighter";
+    var sp = makeSprite(C.white);
+    for (var i = 0; i < flakes.length; i++) {
+      var f = flakes[i];
+      f.y += f.vy * 60 * dt;
+      f.x += (f.vx + Math.sin(now * 0.0011 + f.ph) * 0.35) * 60 * dt;
+      if (f.y > H + 10) { f.y = -10; f.x = Math.random() * W; }
+      if (f.x < -10) f.x = W + 10;
+      if (f.x > W + 10) f.x = -10;
+
+      var size = f.r * 7;
+      ctx.globalAlpha = f.a;
+      ctx.drawImage(sp, f.x - size / 2, f.y - size / 2, size, size);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawVignette() {
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // ---------- 主循环 ----------
+  function frame(now) {
+    if (!last) last = now;
+    var dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+
+    var speed = reduceMotion ? 0.012 : (0.045 + 0.075 * pointerX);
+    rot += dt * speed;
+
+    drawBackground();
+    drawStars(now);
+    drawFloor();
+    drawTree(now);
+    drawStarTopper(now);
+    drawSnow(dt, now);
+    drawSparks(dt);
+    drawVignette();
+
+    requestAnimationFrame(frame);
+  }
+
+  function onResize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.round(W * DPR);
+    canvas.height = Math.round(H * DPR);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildScene();
+  }
+
+  window.addEventListener("resize", onResize);
+  window.addEventListener("orientationchange", function () {
+    setTimeout(onResize, 150);
+  });
+
+  onResize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
